@@ -288,3 +288,5 @@ The database (`complaints.db`) is **auto-created and seeded** on first run with 
 
 
 > *SmartGov — Making Governance Accountable, Transparent & Citizen-Centric* 🏛️
+#   e - g o v e r n a n c e  
+ 
