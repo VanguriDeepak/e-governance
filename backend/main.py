@@ -145,16 +145,17 @@ def register(data: RegisterRequest):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = ?", (data.email,))
+        cursor.execute("SELECT id FROM users WHERE email = %s", (data.email,))
         if cursor.fetchone():
             raise HTTPException(status_code=409, detail="Email already registered")
 
         cursor.execute("""
             INSERT INTO users (full_name, email, phone, password_hash, role, department)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (data.full_name, data.email, data.phone,
               hash_password(data.password), data.role, data.department))
-        user_id = cursor.lastrowid
+        user_id = cursor.fetchone()["id"]
         conn.commit()
 
         token = create_token(user_id, data.email, data.role)
@@ -183,14 +184,14 @@ def login(data: LoginRequest):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = ? AND is_active = 1", (data.email,))
+        cursor.execute("SELECT * FROM users WHERE email = %s AND is_active = 1", (data.email,))
         user = cursor.fetchone()
 
         if not user or not verify_password(data.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         # Update last login
-        cursor.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user["id"],))
+        cursor.execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s", (user["id"],))
         conn.commit()
 
         token = create_token(user["id"], user["email"], user["role"])
@@ -217,7 +218,7 @@ def get_me(authorization: str = Header(...)):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, full_name, email, phone, role, department, created_at, last_login FROM users WHERE id = ?",
+        cursor.execute("SELECT id, full_name, email, phone, role, department, created_at, last_login FROM users WHERE id = %s",
                        (current_user["user_id"],))
         user = cursor.fetchone()
         if not user:
@@ -252,16 +253,17 @@ def submit_complaint(data: ComplaintRequest, authorization: str = Header(...)):
         cursor.execute("""
             INSERT INTO complaints (complaint_number, citizen_id, title, description,
                 category, department, location, priority, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'submitted')
+            RETURNING id
         """, (complaint_number, current_user["user_id"], data.title, data.description,
               data.category, data.department, data.location, data.priority))
 
-        complaint_id = cursor.lastrowid
+        complaint_id = cursor.fetchone()["id"]
 
         # Add timeline entry
         cursor.execute("""
             INSERT INTO complaint_timeline (complaint_id, action, new_status, notes, updated_by)
-            VALUES (?, 'Complaint Submitted', 'submitted', 'Complaint registered successfully', ?)
+            VALUES (%s, 'Complaint Submitted', 'submitted', 'Complaint registered successfully', %s)
         """, (complaint_id, current_user["user_id"]))
 
         # Notify admins
@@ -270,7 +272,7 @@ def submit_complaint(data: ComplaintRequest, authorization: str = Header(...)):
         for admin in admins:
             cursor.execute("""
                 INSERT INTO notifications (user_id, complaint_id, message)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             """, (admin["id"], complaint_id,
                   f"New complaint #{complaint_number}: {data.title} received"))
 
@@ -310,20 +312,20 @@ def list_complaints(
 
         # Citizens only see their own complaints
         if current_user["role"] == "citizen":
-            where_clauses.append("c.citizen_id = ?")
+            where_clauses.append("c.citizen_id = %s")
             params.append(current_user["user_id"])
 
         if status:
-            where_clauses.append("c.status = ?")
+            where_clauses.append("c.status = %s")
             params.append(status)
         if category:
-            where_clauses.append("c.category = ?")
+            where_clauses.append("c.category = %s")
             params.append(category)
         if priority:
-            where_clauses.append("c.priority = ?")
+            where_clauses.append("c.priority = %s")
             params.append(priority)
         if department:
-            where_clauses.append("c.department = ?")
+            where_clauses.append("c.department = %s")
             params.append(department)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
@@ -342,7 +344,7 @@ def list_complaints(
             LEFT JOIN users s ON c.assigned_to = s.id
             {where_sql}
             ORDER BY c.created_at DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """
         cursor.execute(query, params + [limit, offset])
         complaints = [dict(row) for row in cursor.fetchall()]
@@ -377,7 +379,7 @@ def get_complaint(complaint_id: int, authorization: str = Header(...)):
             FROM complaints c
             LEFT JOIN users u ON c.citizen_id = u.id
             LEFT JOIN users s ON c.assigned_to = s.id
-            WHERE c.id = ?
+            WHERE c.id = %s
         """, (complaint_id,))
         complaint = cursor.fetchone()
 
@@ -393,13 +395,13 @@ def get_complaint(complaint_id: int, authorization: str = Header(...)):
             SELECT t.*, u.full_name as updated_by_name
             FROM complaint_timeline t
             LEFT JOIN users u ON t.updated_by = u.id
-            WHERE t.complaint_id = ?
+            WHERE t.complaint_id = %s
             ORDER BY t.created_at ASC
         """, (complaint_id,))
         timeline = [dict(row) for row in cursor.fetchall()]
 
         # Get feedback
-        cursor.execute("SELECT * FROM feedback WHERE complaint_id = ?", (complaint_id,))
+        cursor.execute("SELECT * FROM feedback WHERE complaint_id = %s", (complaint_id,))
         feedback = cursor.fetchone()
 
         return {
@@ -431,7 +433,7 @@ def update_complaint_status(
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM complaints WHERE id = ?", (complaint_id,))
+        cursor.execute("SELECT * FROM complaints WHERE id = %s", (complaint_id,))
         complaint = cursor.fetchone()
         if not complaint:
             raise HTTPException(status_code=404, detail="Complaint not found")
@@ -442,29 +444,29 @@ def update_complaint_status(
         if resolved_at:
             cursor.execute("""
                 UPDATE complaints
-                SET status = ?, updated_at = datetime('now'), resolved_at = datetime('now'),
-                    resolution_notes = ?, assigned_to = COALESCE(?, assigned_to)
-                WHERE id = ?
+                SET status = %s, updated_at = datetime('now'), resolved_at = datetime('now'),
+                    resolution_notes = %s, assigned_to = COALESCE(%s, assigned_to)
+                WHERE id = %s
             """, (data.status, data.notes, data.assigned_to, complaint_id))
         else:
             cursor.execute("""
                 UPDATE complaints
-                SET status = ?, updated_at = datetime('now'),
-                    resolution_notes = ?, assigned_to = COALESCE(?, assigned_to)
-                WHERE id = ?
+                SET status = %s, updated_at = datetime('now'),
+                    resolution_notes = %s, assigned_to = COALESCE(%s, assigned_to)
+                WHERE id = %s
             """, (data.status, data.notes, data.assigned_to, complaint_id))
 
         # Add timeline
         cursor.execute("""
             INSERT INTO complaint_timeline (complaint_id, action, old_status, new_status, notes, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (complaint_id, f"Status updated to {data.status}",
               old_status, data.status, data.notes, current_user["user_id"]))
 
         # Notify citizen
         cursor.execute("""
             INSERT INTO notifications (user_id, complaint_id, message)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
         """, (complaint["citizen_id"], complaint_id,
               f"Your complaint #{complaint['complaint_number']} status updated to: {data.status.upper()}"))
 
@@ -510,7 +512,7 @@ def get_analytics_dashboard(authorization: str = Header(...)):
         # Average resolution time (in hours)
         cursor.execute("""
             SELECT AVG(
-                (julianday(resolved_at) - julianday(created_at)) * 24
+                EXTRACT(EPOCH FROM (resolved_at::timestamp - created_at::timestamp)) / 3600
             ) as avg_hours
             FROM complaints WHERE resolved_at IS NOT NULL
         """)
@@ -524,9 +526,9 @@ def get_analytics_dashboard(authorization: str = Header(...)):
 
         # Monthly trend (last 6 months)
         cursor.execute("""
-            SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as count
+            SELECT TO_CHAR(created_at, 'YYYY-MM') as month, COUNT(*) as count
             FROM complaints
-            WHERE created_at >= date('now', '-6 months')
+            WHERE created_at >= CURRENT_DATE - INTERVAL '6 months'
             GROUP BY month ORDER BY month
         """)
         monthly_trend = [dict(row) for row in cursor.fetchall()]
@@ -596,7 +598,7 @@ def submit_feedback(complaint_id: int, data: FeedbackRequest, authorization: str
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM complaints WHERE id = ?", (complaint_id,))
+        cursor.execute("SELECT * FROM complaints WHERE id = %s", (complaint_id,))
         complaint = cursor.fetchone()
         if not complaint:
             raise HTTPException(status_code=404, detail="Complaint not found")
@@ -606,8 +608,11 @@ def submit_feedback(complaint_id: int, data: FeedbackRequest, authorization: str
             raise HTTPException(status_code=400, detail="Can only rate resolved/closed complaints")
 
         cursor.execute("""
-            INSERT OR REPLACE INTO feedback (complaint_id, citizen_id, rating, comment)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO feedback (complaint_id, citizen_id, rating, comment)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (complaint_id) DO UPDATE SET
+                rating = EXCLUDED.rating,
+                comment = EXCLUDED.comment
         """, (complaint_id, current_user["user_id"], data.rating, data.comment))
         conn.commit()
         return {"success": True, "message": "Feedback submitted successfully"}
@@ -629,12 +634,12 @@ def get_notifications(authorization: str = Header(...)):
             SELECT n.*, c.complaint_number
             FROM notifications n
             LEFT JOIN complaints c ON n.complaint_id = c.id
-            WHERE n.user_id = ?
+            WHERE n.user_id = %s
             ORDER BY n.created_at DESC LIMIT 20
         """, (current_user["user_id"],))
         notifications = [dict(row) for row in cursor.fetchall()]
 
-        cursor.execute("SELECT COUNT(*) as unread FROM notifications WHERE user_id = ? AND is_read = 0",
+        cursor.execute("SELECT COUNT(*) as unread FROM notifications WHERE user_id = %s AND is_read = 0",
                        (current_user["user_id"],))
         unread_count = cursor.fetchone()["unread"]
 
@@ -650,7 +655,7 @@ def mark_notification_read(notification_id: int, authorization: str = Header(...
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?",
+        cursor.execute("UPDATE notifications SET is_read = 1 WHERE id = %s AND user_id = %s",
                        (notification_id, current_user["user_id"]))
         conn.commit()
         return {"success": True, "message": "Notification marked as read"}
@@ -717,7 +722,7 @@ async def upload_attachment(
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE complaints SET attachment_path = ? WHERE id = ?",
+        cursor.execute("UPDATE complaints SET attachment_path = %s WHERE id = %s",
                        (filename, complaint_id))
         conn.commit()
     finally:
@@ -741,7 +746,7 @@ def delete_complaint(complaint_id: int, authorization: str = Header(...)):
         cursor = conn.cursor()
         # Fetch the complaint
         cursor.execute("""
-            SELECT id, citizen_id, department, status FROM complaints WHERE id = ?
+            SELECT id, citizen_id, department, status FROM complaints WHERE id = %s
         """, (complaint_id,))
         complaint = cursor.fetchone()
         if not complaint:
@@ -765,9 +770,9 @@ def delete_complaint(complaint_id: int, authorization: str = Header(...)):
         # admin: no restrictions
 
         # Cascade delete: timeline, notifications, then complaint
-        cursor.execute("DELETE FROM complaint_timeline WHERE complaint_id = ?", (complaint_id,))
-        cursor.execute("DELETE FROM notifications WHERE complaint_id = ?", (complaint_id,))
-        cursor.execute("DELETE FROM complaints WHERE id = ?", (complaint_id,))
+        cursor.execute("DELETE FROM complaint_timeline WHERE complaint_id = %s", (complaint_id,))
+        cursor.execute("DELETE FROM notifications WHERE complaint_id = %s", (complaint_id,))
+        cursor.execute("DELETE FROM complaints WHERE id = %s", (complaint_id,))
         conn.commit()
         return {"success": True, "message": "Complaint deleted successfully"}
     finally:
